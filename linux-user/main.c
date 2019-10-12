@@ -272,6 +272,11 @@ static void handle_arg_argv0(const char *arg)
     argv0 = strdup(arg);
 }
 
+static void handle_arg_execve(const char *arg)
+{
+    execve_interp_path = strdup(arg);
+}
+
 static void handle_arg_stack_size(const char *arg)
 {
     char *p;
@@ -426,6 +431,8 @@ static const struct qemu_argument arg_table[] = {
      "var",        "unsets targets environment variable (see below)"},
     {"0",          "QEMU_ARGV0",       true,  handle_arg_argv0,
      "argv0",      "forces target process argv[0] to be 'argv0'"},
+    {"e",          "QEMU_EXECVE",      true,  handle_arg_execve,
+     "path",       "interpreter to use when running program passed to execve()"},
     {"r",          "QEMU_UNAME",       true,  handle_arg_uname,
      "uname",      "set qemu uname release string to 'uname'"},
     {"B",          "QEMU_GUEST_BASE",  true,  handle_arg_guest_base,

@@ -369,6 +369,7 @@ extern long safe_syscall_base(int *pending, long number, ...);
 
 /* syscall.c */
 int host_to_target_waitstatus(int status);
+extern const char* execve_interp_path;
 
 /* strace.c */
 void print_syscall(int num,

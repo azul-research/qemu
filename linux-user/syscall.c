@@ -58,6 +58,7 @@
 #include <linux/icmpv6.h>
 #include <linux/errqueue.h>
 #include <linux/random.h>
+#include <linux/binfmts.h>
 #ifdef CONFIG_TIMERFD
 #include <sys/timerfd.h>
 #endif
@@ -1061,7 +1062,7 @@ static inline rlim_t target_to_host_rlim(abi_ulong target_rlim)
 {
     abi_ulong target_rlim_swap;
     rlim_t result;
-    
+
     target_rlim_swap = tswapal(target_rlim);
     if (target_rlim_swap == TARGET_RLIM_INFINITY)
         return RLIM_INFINITY;
@@ -1069,7 +1070,7 @@ static inline rlim_t target_to_host_rlim(abi_ulong target_rlim)
     result = target_rlim_swap;
     if (target_rlim_swap != (rlim_t)result)
         return RLIM_INFINITY;
-    
+
     return result;
 }
 
@@ -1077,13 +1078,13 @@ static inline abi_ulong host_to_target_rlim(rlim_t rlim)
 {
     abi_ulong target_rlim_swap;
     abi_ulong result;
-    
+
     if (rlim == RLIM_INFINITY || rlim != (abi_long)rlim)
         target_rlim_swap = TARGET_RLIM_INFINITY;
     else
         target_rlim_swap = rlim;
     result = tswapal(target_rlim_swap);
-    
+
     return result;
 }
 
@@ -1523,9 +1524,9 @@ static inline abi_long target_to_host_cmsg(struct msghdr *msgh,
     abi_ulong target_cmsg_addr;
     struct target_cmsghdr *target_cmsg, *target_cmsg_start;
     socklen_t space = 0;
-    
+
     msg_controllen = tswapal(target_msgh->msg_controllen);
-    if (msg_controllen < sizeof (struct target_cmsghdr)) 
+    if (msg_controllen < sizeof (struct target_cmsghdr))
         goto the_end;
     target_cmsg_addr = tswapal(target_msgh->msg_control);
     target_cmsg = lock_user(VERIFY_READ, target_cmsg_addr, msg_controllen, 1);
@@ -1607,7 +1608,7 @@ static inline abi_long host_to_target_cmsg(struct target_msghdr *target_msgh,
     socklen_t space = 0;
 
     msg_controllen = tswapal(target_msgh->msg_controllen);
-    if (msg_controllen < sizeof (struct target_cmsghdr)) 
+    if (msg_controllen < sizeof (struct target_cmsghdr))
         goto the_end;
     target_cmsg_addr = tswapal(target_msgh->msg_control);
     target_cmsg = lock_user(VERIFY_WRITE, target_cmsg_addr, msg_controllen, 0);
@@ -5487,7 +5488,7 @@ abi_long do_set_thread_area(CPUX86State *env, abi_ulong ptr)
     }
     unlock_user_struct(target_ldt_info, ptr, 1);
 
-    if (ldt_info.entry_number < TARGET_GDT_ENTRY_TLS_MIN || 
+    if (ldt_info.entry_number < TARGET_GDT_ENTRY_TLS_MIN ||
         ldt_info.entry_number > TARGET_GDT_ENTRY_TLS_MAX)
            return -TARGET_EINVAL;
     seg_32bit = ldt_info.flags & 1;
@@ -5565,7 +5566,7 @@ static abi_long do_get_thread_area(CPUX86State *env, abi_ulong ptr)
     lp = (uint32_t *)(gdt_table + idx);
     entry_1 = tswap32(lp[0]);
     entry_2 = tswap32(lp[1]);
-    
+
     read_exec_only = ((entry_2 >> 9) & 1) ^ 1;
     contents = (entry_2 >> 10) & 3;
     seg_not_present = ((entry_2 >> 15) & 1) ^ 1;
@@ -5581,8 +5582,8 @@ static abi_long do_get_thread_area(CPUX86State *env, abi_ulong ptr)
         (read_exec_only << 3) | (limit_in_pages << 4) |
         (seg_not_present << 5) | (useable << 6) | (lm << 7);
     limit = (entry_1 & 0xffff) | (entry_2  & 0xf0000);
-    base_addr = (entry_1 >> 16) | 
-        (entry_2 & 0xff000000) | 
+    base_addr = (entry_1 >> 16) |
+        (entry_2 & 0xff000000) |
         ((entry_2 & 0xff) << 16);
     target_ldt_info->base_addr = tswapal(base_addr);
     target_ldt_info->limit = tswap32(limit);
@@ -7218,6 +7219,118 @@ static int host_to_target_cpu_mask(const unsigned long *host_mask,
     return 0;
 }
 
+const char *execve_interp_path = NULL;
+
+static abi_long safe_execve_interp(char *filename, char *argv[], char *envp[])
+{
+    int argc = 0;
+    char shebang_buf[BINPRM_BUF_SIZE];
+
+    for (char **arg = argv; *arg; ++arg) {
+        ++argc;
+    }
+
+    int fd = open(filename, O_RDONLY);
+    if (fd == -1) {
+        return -errno;
+    }
+
+    int rd = read(fd, shebang_buf, sizeof shebang_buf);
+    if (rd == -1) {
+        int err = errno;
+        close(fd);
+        return -err;
+    }
+    close(fd);
+
+    char *interp_path = NULL;
+    char *interp_arg = NULL;
+
+    if (rd >= 2 && shebang_buf[0] == '#' && shebang_buf[1] == '!') {
+        if (rd == sizeof shebang_buf) {
+            shebang_buf[rd - 1] = '\0';
+        } else {
+            shebang_buf[rd] = '\0';
+        }
+
+        char *nl = strchr(shebang_buf, '\n');
+        if (nl) {
+            *nl = '\0';
+        }
+
+        char *cur = shebang_buf + 2;
+
+        /* skip whitespaces before interpreter filename */
+        for (; *cur && ((*cur == ' ') || (*cur == '\t')); ++cur);
+
+        if (!*cur) {
+            /* couldn't find interpreter */
+            return -ENOEXEC;
+        }
+
+        interp_path = cur;
+
+        for (; *cur && (*cur != ' ') && (*cur != '\t'); ++cur);
+
+        if (*cur) {
+            /* found whitespace */
+            *cur++ = '\0';
+
+            /* skip until interpreter argument */
+            for (; *cur && ((*cur == ' ') || (*cur == '\t')); ++cur);
+
+            if (*cur) {
+                interp_arg = cur;
+            }
+
+            for (; *cur && (*cur != ' ') && (*cur != '\t'); ++cur);
+
+            if (*cur) {
+                *cur = '\0';
+            }
+        }
+    }
+
+    /* we need to run interpreter as so:
+     * execve_interp_path -e execve_interp_path -0 filename argv[]
+     */
+
+    int new_argc = 5 + argc;
+    if (interp_path) {
+        ++new_argc;
+        if (interp_arg) {
+            ++new_argc;
+        }
+    }
+
+    char **new_argv = alloca((new_argc + 1) * sizeof (char*));
+    char **argp = new_argv;
+    *argp++ = strdup(execve_interp_path);
+    *argp++ = strdup("-e");
+    *argp++ = strdup(execve_interp_path);
+    *argp++ = strdup("-0");
+
+    if (interp_path) {
+        *argp++ = strdup(interp_path); /* argument to -0 */
+        *argp++ = strdup(interp_path); /* argv[0] */
+        if (interp_arg) {
+            *argp++ = strdup(interp_arg);
+        }
+    } else {
+        *argp++ = filename;
+    }
+
+    *argp++ = filename;
+    ++argv;
+
+    while (*argv) {
+        *argp++ = *argv++;
+    }
+    *argp++ = NULL;
+
+    return get_errno(safe_execve(execve_interp_path, new_argv, envp));
+}
+
 /* This is an internal helper for do_syscall so that it is easier
  * to have a single return point, so that actions, such as logging
  * of syscall results, can be performed.
@@ -7507,7 +7620,11 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
              * before the execve completes and makes it the other
              * program's problem.
              */
-            ret = get_errno(safe_execve(p, argp, envp));
+            if (execve_interp_path) {
+                ret = get_errno(safe_execve_interp(p, argp, envp));
+            } else {
+                ret = get_errno(safe_execve(p, argp, envp));
+            }
             unlock_user(p, arg1, 0);
 
             goto execve_end;
@@ -10444,7 +10561,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         return get_errno(fchown(arg1, low2highuid(arg2), low2highgid(arg3)));
 #if defined(TARGET_NR_fchownat)
     case TARGET_NR_fchownat:
-        if (!(p = lock_user_string(arg2))) 
+        if (!(p = lock_user_string(arg2)))
             return -TARGET_EFAULT;
         ret = get_errno(fchownat(arg1, p, low2highuid(arg3),
                                  low2highgid(arg4), arg5));
