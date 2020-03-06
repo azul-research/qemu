@@ -44,7 +44,16 @@
 
 void icp_pic_print_info(ICPState *icp, Monitor *mon)
 {
-    int cpu_index = icp->cs ? icp->cs->cpu_index : -1;
+    int cpu_index;
+
+    /* Skip partially initialized vCPUs. This can happen on sPAPR when vCPUs
+     * are hot plugged or unplugged.
+     */
+    if (!icp) {
+        return;
+    }
+
+    cpu_index = icp->cs ? icp->cs->cpu_index : -1;
 
     if (!icp->output) {
         return;
@@ -274,10 +283,8 @@ static const VMStateDescription vmstate_icp_server = {
     },
 };
 
-static void icp_reset_handler(void *dev)
+void icp_reset(ICPState *icp)
 {
-    ICPState *icp = ICP(dev);
-
     icp->xirr = 0;
     icp->pending_priority = 0xff;
     icp->mfrr = 0xff;
@@ -288,7 +295,7 @@ static void icp_reset_handler(void *dev)
     if (kvm_irqchip_in_kernel()) {
         Error *local_err = NULL;
 
-        icp_set_kvm_state(ICP(dev), &local_err);
+        icp_set_kvm_state(icp, &local_err);
         if (local_err) {
             error_report_err(local_err);
         }
@@ -351,7 +358,6 @@ static void icp_realize(DeviceState *dev, Error **errp)
         }
     }
 
-    qemu_register_reset(icp_reset_handler, dev);
     vmstate_register(NULL, icp->cs->cpu_index, &vmstate_icp_server, icp);
 }
 
@@ -360,7 +366,6 @@ static void icp_unrealize(DeviceState *dev, Error **errp)
     ICPState *icp = ICP(dev);
 
     vmstate_unregister(NULL, &vmstate_icp_server, icp);
-    qemu_unregister_reset(icp_reset_handler, dev);
 }
 
 static void icp_class_init(ObjectClass *klass, void *data)
@@ -369,6 +374,11 @@ static void icp_class_init(ObjectClass *klass, void *data)
 
     dc->realize = icp_realize;
     dc->unrealize = icp_unrealize;
+    /*
+     * Reason: part of XICS interrupt controller, needs to be wired up
+     * by icp_create().
+     */
+    dc->user_creatable = false;
 }
 
 static const TypeInfo icp_info = {
@@ -387,8 +397,10 @@ Object *icp_create(Object *cpu, const char *type, XICSFabric *xi, Error **errp)
     obj = object_new(type);
     object_property_add_child(cpu, type, obj, &error_abort);
     object_unref(obj);
+    object_ref(OBJECT(xi));
     object_property_add_const_link(obj, ICP_PROP_XICS, OBJECT(xi),
                                    &error_abort);
+    object_ref(cpu);
     object_property_add_const_link(obj, ICP_PROP_CPU, cpu, &error_abort);
     object_property_set_bool(obj, true, "realized", &local_err);
     if (local_err) {
@@ -398,6 +410,15 @@ Object *icp_create(Object *cpu, const char *type, XICSFabric *xi, Error **errp)
     }
 
     return obj;
+}
+
+void icp_destroy(ICPState *icp)
+{
+    Object *obj = OBJECT(icp);
+
+    object_unref(object_property_get_link(obj, ICP_PROP_CPU, &error_abort));
+    object_unref(object_property_get_link(obj, ICP_PROP_XICS, &error_abort));
+    object_unparent(obj);
 }
 
 /*
@@ -689,6 +710,11 @@ static void ics_class_init(ObjectClass *klass, void *data)
     dc->props = ics_properties;
     dc->reset = ics_reset;
     dc->vmsd = &vmstate_ics;
+    /*
+     * Reason: part of XICS interrupt controller, needs to be wired up,
+     * e.g. by spapr_irq_init().
+     */
+    dc->user_creatable = false;
 }
 
 static const TypeInfo ics_info = {

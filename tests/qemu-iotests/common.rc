@@ -53,6 +53,26 @@ poke_file()
     printf "$3" | dd "of=$1" bs=1 "seek=$2" conv=notrunc &>/dev/null
 }
 
+# peek_file_le 'test.img' 512 2 => 65534
+peek_file_le()
+{
+    # Wrap in echo $() to strip spaces
+    echo $(od -j"$2" -N"$3" --endian=little -An -vtu"$3" "$1")
+}
+
+# peek_file_be 'test.img' 512 2 => 65279
+peek_file_be()
+{
+    # Wrap in echo $() to strip spaces
+    echo $(od -j"$2" -N"$3" --endian=big -An -vtu"$3" "$1")
+}
+
+# peek_file_raw 'test.img' 512 2 => '\xff\xfe'
+peek_file_raw()
+{
+    dd if="$1" bs=1 skip="$2" count="$3" status=none
+}
+
 
 if ! . ./common.config
     then
@@ -197,7 +217,7 @@ if [ "$IMGOPTSSYNTAX" = "true" ]; then
         TEST_IMG="$DRIVER,file.filename=$TEST_DIR/t.$IMGFMT"
     elif [ "$IMGPROTO" = "nbd" ]; then
         TEST_IMG_FILE=$TEST_DIR/t.$IMGFMT
-        TEST_IMG="$DRIVER,file.driver=nbd,file.host=127.0.0.1,file.port=10810"
+        TEST_IMG="$DRIVER,file.driver=nbd,file.type=unix,file.path=$SOCKDIR/nbd"
     elif [ "$IMGPROTO" = "ssh" ]; then
         TEST_IMG_FILE=$TEST_DIR/t.$IMGFMT
         TEST_IMG="$DRIVER,file.driver=ssh,file.host=127.0.0.1,file.path=$TEST_IMG_FILE"
@@ -213,7 +233,7 @@ else
         TEST_IMG=$TEST_DIR/t.$IMGFMT
     elif [ "$IMGPROTO" = "nbd" ]; then
         TEST_IMG_FILE=$TEST_DIR/t.$IMGFMT
-        TEST_IMG="nbd:127.0.0.1:10810"
+        TEST_IMG="nbd+unix:///?socket=$SOCK_DIR/nbd"
     elif [ "$IMGPROTO" = "ssh" ]; then
         TEST_IMG_FILE=$TEST_DIR/t.$IMGFMT
         REMOTE_TEST_DIR="ssh://\\($USER@\\)\\?127.0.0.1\\(:[0-9]\\+\\)\\?$TEST_DIR"
@@ -273,7 +293,7 @@ _stop_nbd_server()
         local QEMU_NBD_PID
         read QEMU_NBD_PID < "${QEMU_TEST_DIR}/qemu-nbd.pid"
         kill ${QEMU_NBD_PID}
-        rm -f "${QEMU_TEST_DIR}/qemu-nbd.pid"
+        rm -f "${QEMU_TEST_DIR}/qemu-nbd.pid" "$SOCK_DIR/nbd"
     fi
 }
 
@@ -329,11 +349,14 @@ _make_test_img()
      fi
     ) | _filter_img_create
 
-    # Start an NBD server on the image file, which is what we'll be talking to
+    # Start an NBD server on the image file, which is what we'll be talking to.
+    # Once NBD gains resize support, we may also want to use -f raw at the
+    # server and interpret format over NBD, but for now, the format is
+    # interpreted at the server and raw data sent over NBD.
     if [ $IMGPROTO = "nbd" ]; then
         # Pass a sufficiently high number to -e that should be enough for all
         # tests
-        eval "$QEMU_NBD -v -t -b 127.0.0.1 -p 10810 -f $IMGFMT -e 42 -x '' $TEST_IMG_FILE >/dev/null &"
+        eval "$QEMU_NBD -v -t -k '$SOCK_DIR/nbd' -f $IMGFMT -e 42 -x '' $TEST_IMG_FILE >/dev/null &"
         sleep 1 # FIXME: qemu-nbd needs to be listening before we continue
     fi
 
@@ -405,6 +428,23 @@ _check_test_img()
             $QEMU_IMG check "$@" -f $IMGFMT "$TEST_IMG" 2>&1
         fi
     ) | _filter_testdir | _filter_qemu_img_check
+
+    # return real qemu_img check status, to analyze in
+    # _check_test_img_ignore_leaks
+    return ${PIPESTATUS[0]}
+}
+
+_check_test_img_ignore_leaks()
+{
+    out=$(_check_test_img "$@")
+    status=$?
+    if [ $status = 3 ]; then
+        # This must correspond to success output in dump_human_image_check()
+        echo "No errors were found on the image."
+        return 0
+    fi
+    echo "$out"
+    return $status
 }
 
 _img_info()
